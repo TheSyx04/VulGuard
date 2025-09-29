@@ -22,7 +22,7 @@ dependencies:
   - pytorch
   - torchvision
   - torchaudio
-  - pytorch-cuda=12.2
+  - pytorch-cuda
   - pyg
   - pip:
       - gdown==5.1.0
