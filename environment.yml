@@ -42,7 +42,7 @@ dependencies:
       - dateparser==0.7.6
       - networkx==2.6.3
       - beautifulsoup4==4.10.0
-      - lxml==4.6.4
+      - lxml>=4.9.0
       - packaging==21.3
       - regex==2022.1.18
       - python-Levenshtein==0.12.2
