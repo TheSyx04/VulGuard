@@ -10,7 +10,6 @@ dependencies:
   - python=3.11
   - cudatoolkit=11.8
   - pip
-  - srcml
   - pandas
   - numpy
   - matplotlib
