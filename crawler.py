@@ -480,9 +480,21 @@ class OpenSSLCommitCrawler:
     
     def save_non_master_cherry_picks(self, api_results: Dict, output_file='non_master_cherry_picks.json'):
         """Save cherry-pick commits that are not on master branch to a separate JSON file."""
+        # Transform cherry_pick_references to include direct links
+        cherry_pick_references_with_links = {}
+        
+        for source_commit, cherry_picks in api_results['non_master_cherry_picks'].items():
+            cherry_pick_references_with_links[source_commit] = []
+            for cp_hash in cherry_picks:
+                cherry_pick_entry = {
+                    'commit_hash': cp_hash,
+                    'commit_url': f'https://github.com/openssl/openssl/commit/{cp_hash}'
+                }
+                cherry_pick_references_with_links[source_commit].append(cherry_pick_entry)
+        
         non_master_data = {
             'total_source_commits': len(api_results['non_master_cherry_picks']),
-            'cherry_pick_references': api_results['non_master_cherry_picks'],
+            'cherry_pick_references': cherry_pick_references_with_links,
             'branch_info': api_results['cherry_pick_branch_info'],
             'extracted_at': time.strftime('%Y-%m-%d %H:%M:%S')
         }
