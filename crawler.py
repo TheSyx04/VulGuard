@@ -179,30 +179,109 @@ class OpenSSLCommitCrawler:
             return None
     
     def get_commit_branch_info(self, commit_hash: str) -> Optional[Dict]:
-        """Get branch information for a specific commit from GitHub API."""
-        # Get branches that contain this commit
-        url = f"https://api.github.com/repos/openssl/openssl/commits/{commit_hash}/branches-where-head"
+        """Get branch information for a specific commit by scraping the GitHub commit page."""
+        # Construct the GitHub commit page URL
+        url = f"https://github.com/openssl/openssl/commit/{commit_hash}"
         
         try:
-            response = self.github_session.get(url, timeout=30)
+            response = self.session.get(url, timeout=30)
             if response.status_code == 200:
-                branches = response.json()
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Look for branch comparison links in the commit page
+                # Pattern: <a href="/openssl/openssl/compare/master" class="...">master</a>
+                branches = []
+                
+                # Find all links that match the branch comparison pattern
+                branch_links = soup.find_all('a', href=re.compile(r'/openssl/openssl/compare/'))
+                
+                for link in branch_links:
+                    href = link.get('href', '')
+                    # Extract branch name from href like "/openssl/openssl/compare/master"
+                    branch_match = re.search(r'/openssl/openssl/compare/([^/\?]+)', href)
+                    if branch_match:
+                        branch_name = branch_match.group(1)
+                        if branch_name not in branches:  # Avoid duplicates
+                            branches.append(branch_name)
+                
+                # Also look for branch badges or other branch indicators
+                # Sometimes branches are shown in different formats
+                branch_badges = soup.find_all('span', class_=re.compile(r'.*[Bb]ranch.*'))
+                for badge in branch_badges:
+                    text = badge.get_text(strip=True)
+                    # Look for branch names in the text
+                    if text and text not in branches and len(text) < 50:  # Reasonable branch name length
+                        branches.append(text)
+                
+                # Additional method: Look for branch selectors and commit metadata
+                branch_selectors = [
+                    'span[data-menu-button-text]',  # Branch selector button
+                    '.commit-branches span',         # Commit branches section
+                    '[data-testid="branch-name"]',   # Branch name test id
+                    '.branch-name',                  # Branch name class
+                ]
+                
+                for selector in branch_selectors:
+                    elements = soup.select(selector)
+                    for element in elements:
+                        text = element.get_text(strip=True)
+                        # Filter valid branch names
+                        if (text and 
+                            len(text) < 100 and 
+                            text not in branches and
+                            not text.startswith('http') and
+                            ('/' not in text or text.count('/') <= 1)):
+                            branches.append(text)
+                
+                # Fallback: Look for "master" or "main" mentions in page context
+                if not any(b.lower() in ['master', 'main'] for b in branches):
+                    page_text = soup.get_text()
+                    master_patterns = [
+                        r'\\bmaster\\b',
+                        r'\\bmain\\b',
+                    ]
+                    
+                    for pattern in master_patterns:
+                        if re.search(pattern, page_text, re.IGNORECASE):
+                            # Find more specific context
+                            master_contexts = soup.find_all(text=re.compile(pattern, re.IGNORECASE))
+                            for context in master_contexts[:5]:
+                                context_str = str(context).strip().lower()
+                                if any(keyword in context_str for keyword in ['branch', 'compare', 'merge', 'commit']):
+                                    if 'master' in context_str and 'master' not in branches:
+                                        branches.append('master')
+                                    elif 'main' in context_str and 'main' not in branches:
+                                        branches.append('main')
+                                    break
+                            break
+                
+                # Clean up branches
+                cleaned_branches = []
+                for branch in branches:
+                    branch = branch.strip()
+                    if branch and branch not in cleaned_branches:
+                        cleaned_branches.append(branch)
+                
+                # Check if master/main is among the branches
+                is_on_master = any(branch.lower() in ['master', 'main'] for branch in cleaned_branches)
+                
+                logger.info(f"Found branches for commit {commit_hash}: {cleaned_branches}")
+                
                 return {
                     'commit_hash': commit_hash,
-                    'branches': [branch['name'] for branch in branches],
-                    'is_on_master': any(branch['name'] in ['master', 'main'] for branch in branches)
+                    'branches': cleaned_branches,
+                    'is_on_master': is_on_master
                 }
+                
             elif response.status_code == 404:
-                logger.warning(f"Branch info for commit {commit_hash} not found")
-                return None
-            elif response.status_code == 403:
-                logger.error("GitHub API rate limit exceeded")
+                logger.warning(f"Commit page for {commit_hash} not found")
                 return None
             else:
-                logger.warning(f"GitHub API returned status {response.status_code} for commit {commit_hash} branch info")
+                logger.warning(f"GitHub returned status {response.status_code} for commit {commit_hash} page")
                 return None
+                
         except requests.RequestException as e:
-            logger.error(f"Error fetching branch info for commit {commit_hash}: {e}")
+            logger.error(f"Error fetching commit page for {commit_hash}: {e}")
             return None
     
     def extract_cherry_pick_commits(self, message: str) -> List[str]:
@@ -288,7 +367,7 @@ class OpenSSLCommitCrawler:
                         # If we can't get branch info, assume it's not on master
                         non_master_cherry_picks.append(cp_hash)
                     
-                    time.sleep(0.1)  # Small delay between branch API requests
+                    time.sleep(0.5)  # Delay between commit page scraping requests
                 
                 if master_cherry_picks:
                     results['master_branch_cherry_picks'][commit_hash] = master_cherry_picks
