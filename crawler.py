@@ -187,75 +187,81 @@ class OpenSSLCommitCrawler:
             response = self.session.get(url, timeout=30)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Look for branch comparison links in the commit page
-                # Pattern: <a href="/openssl/openssl/compare/master" class="...">master</a>
                 branches = []
                 
-                # Find all links that match the branch comparison pattern
-                branch_links = soup.find_all('a', href=re.compile(r'/openssl/openssl/compare/'))
+                # Method 1: Parse JSON data from script tags (most reliable)
+                script_tags = soup.find_all('script', type='application/json')
+                for script in script_tags:
+                    try:
+                        script_content = script.get_text(strip=True)
+                        if 'defaultBranch' in script_content:
+                            import json
+                            data = json.loads(script_content)
+                            
+                            # Look for repository default branch
+                            if isinstance(data, dict):
+                                repo_info = data.get('payload', {}).get('repo', {})
+                                default_branch = repo_info.get('defaultBranch')
+                                if default_branch and default_branch not in branches:
+                                    branches.append(default_branch)
+                                    logger.info(f"Found default branch from JSON: {default_branch}")
+                    except (json.JSONDecodeError, KeyError) as e:
+                        logger.debug(f"Could not parse script JSON: {e}")
+                        continue
                 
+                # Method 2: Look for the specific branch class mentioned by user
+                branch_elements = soup.find_all(class_="mx-1 prc-BranchName-BranchName-jFtg-")
+                for elem in branch_elements:
+                    branch_text = elem.get_text(strip=True)
+                    if branch_text and branch_text not in branches:
+                        branches.append(branch_text)
+                        logger.info(f"Found branch from class 'mx-1 prc-BranchName-BranchName-jFtg-': {branch_text}")
+                
+                # Method 3: Look for branch comparison links
+                branch_links = soup.find_all('a', href=re.compile(r'/openssl/openssl/compare/'))
                 for link in branch_links:
                     href = link.get('href', '')
-                    # Extract branch name from href like "/openssl/openssl/compare/master"
                     branch_match = re.search(r'/openssl/openssl/compare/([^/\?]+)', href)
                     if branch_match:
                         branch_name = branch_match.group(1)
-                        if branch_name not in branches:  # Avoid duplicates
+                        if branch_name not in branches:
                             branches.append(branch_name)
+                            logger.info(f"Found branch from compare link: {branch_name}")
                 
-                # Also look for branch badges or other branch indicators
-                # Sometimes branches are shown in different formats
-                branch_badges = soup.find_all('span', class_=re.compile(r'.*[Bb]ranch.*'))
-                for badge in branch_badges:
-                    text = badge.get_text(strip=True)
-                    # Look for branch names in the text
-                    if text and text not in branches and len(text) < 50:  # Reasonable branch name length
-                        branches.append(text)
-                
-                # Additional method: Look for branch selectors and commit metadata
-                branch_selectors = [
-                    'span[data-menu-button-text]',  # Branch selector button
-                    '.commit-branches span',         # Commit branches section
-                    '[data-testid="branch-name"]',   # Branch name test id
-                    '.branch-name',                  # Branch name class
+                # Method 4: Look for other branch-related elements
+                branch_patterns = [
+                    r'.*[Bb]ranch.*',
+                    r'.*prc-BranchName.*',
+                    r'.*branch-name.*'
                 ]
                 
-                for selector in branch_selectors:
-                    elements = soup.select(selector)
-                    for element in elements:
-                        text = element.get_text(strip=True)
-                        # Filter valid branch names
+                for pattern in branch_patterns:
+                    elements = soup.find_all(class_=re.compile(pattern))
+                    for elem in elements:
+                        text = elem.get_text(strip=True)
                         if (text and 
-                            len(text) < 100 and 
+                            len(text) < 50 and 
                             text not in branches and
                             not text.startswith('http') and
-                            ('/' not in text or text.count('/') <= 1)):
+                            text.lower() in ['master', 'main']):
                             branches.append(text)
+                            logger.info(f"Found branch from pattern '{pattern}': {text}")
                 
-                # Fallback: Look for "master" or "main" mentions in page context
+                # Method 5: Search for master/main in page text as fallback
                 if not any(b.lower() in ['master', 'main'] for b in branches):
-                    page_text = soup.get_text()
-                    master_patterns = [
-                        r'\\bmaster\\b',
-                        r'\\bmain\\b',
-                    ]
-                    
-                    for pattern in master_patterns:
-                        if re.search(pattern, page_text, re.IGNORECASE):
-                            # Find more specific context
-                            master_contexts = soup.find_all(text=re.compile(pattern, re.IGNORECASE))
-                            for context in master_contexts[:5]:
-                                context_str = str(context).strip().lower()
-                                if any(keyword in context_str for keyword in ['branch', 'compare', 'merge', 'commit']):
-                                    if 'master' in context_str and 'master' not in branches:
-                                        branches.append('master')
-                                    elif 'main' in context_str and 'main' not in branches:
-                                        branches.append('main')
-                                    break
-                            break
+                    page_text = response.text.lower()
+                    if '"defaultbranch":"master"' in page_text:
+                        branches.append('master')
+                        logger.info("Found 'master' branch from page text search")
+                    elif '"defaultbranch":"main"' in page_text:
+                        branches.append('main')
+                        logger.info("Found 'main' branch from page text search")
+                    elif 'master' in page_text and len(branches) == 0:
+                        # Very conservative fallback - only if no other branches found
+                        branches.append('master')
+                        logger.info("Added 'master' as fallback branch")
                 
-                # Clean up branches
+                # Clean up and deduplicate branches
                 cleaned_branches = []
                 for branch in branches:
                     branch = branch.strip()
@@ -265,7 +271,7 @@ class OpenSSLCommitCrawler:
                 # Check if master/main is among the branches
                 is_on_master = any(branch.lower() in ['master', 'main'] for branch in cleaned_branches)
                 
-                logger.info(f"Found branches for commit {commit_hash}: {cleaned_branches}")
+                logger.info(f"Final branches for commit {commit_hash}: {cleaned_branches}, is_on_master: {is_on_master}")
                 
                 return {
                     'commit_hash': commit_hash,
